@@ -1,0 +1,166 @@
+name: Backend Production CI/CD
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/backend/**"
+      - "!apps/backend/.github/**"
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-northeast-2
+  ECR_REPOSITORY: drreborn-backend-prod
+  ECS_CLUSTER: drreborn-prod-cluster
+  ECS_SERVICE: backend-service
+  TASK_DEFINITION_FAMILY: drreborn-backend-prod
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v3
+        with:
+          path: apps/backend/target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run tests
+        working-directory: apps/backend
+        run: cargo test --verbose
+
+      - name: Run clippy
+        working-directory: apps/backend
+        run: cargo clippy -- -D warnings
+
+      - name: Security audit
+        working-directory: apps/backend
+        run: |
+          cargo install cargo-audit
+          cargo audit
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.build-image.outputs.image }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Docker image
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: prod-${{ github.sha }}
+        working-directory: apps/backend
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --push \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:prod-latest \
+            .
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://api.dreborn.shop
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Download current task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ env.TASK_DEFINITION_FAMILY }} \
+            --query taskDefinition > task-definition.json
+
+      - name: Render Amazon ECS task definition
+        id: render-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: backend
+          image: ${{ needs.build.outputs.image }}
+
+      - name: Deploy to Amazon ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.render-task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+          wait-for-minutes: 15
+
+      - name: Health check
+        run: |
+          sleep 30
+          for i in {1..5}; do
+            if curl -f https://api.dreborn.shop/health; then
+              echo "Health check passed"
+              exit 0
+            fi
+            echo "Health check attempt $i failed, retrying..."
+            sleep 10
+          done
+          exit 1
+
+      - name: Deployment summary
+        if: success()
+        run: |
+          echo "### Production Deployment Successful :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Environment: **Production**" >> $GITHUB_STEP_SUMMARY
+          echo "- Image: \`${{ needs.build.outputs.image }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Cluster: \`${{ env.ECS_CLUSTER }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Service: \`${{ env.ECS_SERVICE }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- URL: https://api.dreborn.shop" >> $GITHUB_STEP_SUMMARY
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          echo "Deployment failed, consider manual rollback"
+          # Optional: 자동 롤백 로직 추가
