@@ -13,9 +13,12 @@ on:
 env:
   AWS_REGION: ap-northeast-2
   ECR_REPOSITORY: dr-reborn-server-dev
+  ECS_CLUSTER: dr-reborn-dev-cluster
+  ECS_SERVICE: dr-reborn-dev-service
+  TASK_DEFINITION_FAMILY: dr-reborn-dev-server
 
 jobs:
-  build-and-push:
+  build-and-deploy:
     runs-on: ubuntu-latest
     environment: development
 
@@ -51,10 +54,36 @@ jobs:
             .
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-      - name: Build summary
+      - name: Download current task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ env.TASK_DEFINITION_FAMILY }} \
+            --query taskDefinition > task-definition.json
+
+      - name: Update task definition with new image
+        id: render-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: server
+          image: ${{ steps.build-image.outputs.image }}
+
+      - name: Deploy to Amazon ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.render-task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+          wait-for-minutes: 10
+
+      - name: Deployment summary
         if: success()
         run: |
-          echo "### Build Successful" >> $GITHUB_STEP_SUMMARY
+          echo "### Deployment Successful" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- Environment: **Development**" >> $GITHUB_STEP_SUMMARY
           echo "- Image: \`${{ steps.build-image.outputs.image }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Cluster: \`${{ env.ECS_CLUSTER }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Service: \`${{ env.ECS_SERVICE }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- URL: http://dr-reborn-dev-alb-402504929.ap-northeast-2.elb.amazonaws.com/health" >> $GITHUB_STEP_SUMMARY
