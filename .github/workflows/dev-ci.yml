@@ -4,15 +4,15 @@ on:
   push:
     branches: [develop]
     paths:
-      - "apps/server/**"
+      - "src/**"
+      - "Dockerfile"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/dev-ci.yml"
 
 env:
   AWS_REGION: ap-northeast-2
   ECR_REPOSITORY: dr-reborn-server-dev
-  # ECS_CLUSTER: your-cluster
-  # ECS_SERVICE: your-service
-  # TASK_DEFINITION_FAMILY: your-task-family
 
 jobs:
   build-and-push:
@@ -43,7 +43,6 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: dev-${{ github.sha }}
         run: |
-          cd apps/server
           docker buildx build \
             --platform linux/amd64 \
             --push \
@@ -51,30 +50,6 @@ jobs:
             -t $ECR_REGISTRY/$ECR_REPOSITORY:dev-latest \
             .
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
-
-      # TODO: Uncomment when ECS is configured
-      # - name: Download current task definition
-      #   run: |
-      #     aws ecs describe-task-definition \
-      #       --task-definition ${{ env.TASK_DEFINITION_FAMILY }} \
-      #       --query taskDefinition > task-definition.json
-
-      # - name: Render Amazon ECS task definition
-      #   id: render-task-def
-      #   uses: aws-actions/amazon-ecs-render-task-definition@v1
-      #   with:
-      #     task-definition: task-definition.json
-      #     container-name: server
-      #     image: ${{ steps.build-image.outputs.image }}
-
-      # - name: Deploy to Amazon ECS
-      #   uses: aws-actions/amazon-ecs-deploy-task-definition@v1
-      #   with:
-      #     task-definition: ${{ steps.render-task-def.outputs.task-definition }}
-      #     service: ${{ env.ECS_SERVICE }}
-      #     cluster: ${{ env.ECS_CLUSTER }}
-      #     wait-for-service-stability: true
-      #     wait-for-minutes: 10
 
       - name: Build summary
         if: success()
